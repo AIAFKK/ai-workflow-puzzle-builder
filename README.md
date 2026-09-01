@@ -2,6 +2,8 @@
 
 **Live demo: https://aiafkk.github.io/ai-workflow-puzzle-builder/** — no setup, runs entirely in your browser.
 
+**Demo video (~2 min, 6 journeys): https://github.com/AIAFKK/ai-workflow-puzzle-builder/blob/main/demo/demo-video.webm**
+
 An interactive puzzle app for learning how AI workflows fail — and how to make them recover.
 Build, run, and break 8 seeded workflow puzzles on a visual canvas: inject failures at any block,
 watch the run degrade, and see recovery strategies (retry / fallback / repair / default / route to human /
@@ -77,6 +79,36 @@ src/
 └── main.tsx
 ```
 
+### Architecture diagram
+
+```mermaid
+flowchart LR
+    subgraph UI["Workflow Builder UI (React + React Flow)"]
+        C[Canvas — blocks, live status]
+        I[Step Inspector — arm failures, decisions]
+        L[Puzzle Brief + Reliability Report]
+        T[Execution Trace]
+    end
+    subgraph DEF["Workflow Definition / Puzzle Store (zustand)"]
+        P[8 seeded puzzles: steps, edges, validation, recovery, mock handlers]
+    end
+    subgraph ENG["Execution Engine (framework-free TS)"]
+        W[Topological walker]
+        R[Runtime.runStep — failure injection + mock handler]
+        V[Validation layer — required/type/enum/format/threshold/evidence]
+        REC[Recovery: retry · fallback · repair · default · route_human · safe_stop]
+        H[Human pause / decision gate]
+        S[Reliability report + scoring]
+    end
+    C --> W
+    I --> P
+    P --> W
+    W --> R --> V --> REC --> H
+    R -.trace.-> T
+    S -.score.-> L
+    H -.approve/edit/reject.-> I
+```
+
 **Engine** (`src/engine/executor.ts`) — framework-free TypeScript. `executeWorkflow()` topologically
 sorts the blocks, runs each through `createRuntime().runStep()` (which applies armed failures and
 the block's mock handler), then validates the output against the block's spec (required fields,
@@ -128,3 +160,74 @@ arming, recovery config, validation spec, human decision UI, per-step trace).
   validator inheritance, and safe stops with partial results.
 - The app is intentionally dependency-light: React 18, React Flow, zustand, zod, Tailwind 4 — all
   MIT-licensed.
+
+## How fault simulation works
+
+Each block carries an optional `failures` spec (kind-matched). Arming a failure mode in the
+Step Inspector adds it to the runtime's `armed` map. When `runStep()` executes a block whose
+kind matches an armed mode, the runtime makes the block's mock handler fail in the
+characteristic way for that mode (throw after timeout, emit malformed JSON, drop a required
+field, return an empty retrieval, under-confident classification, …) — deterministically, every
+run. Recovery then kicks in exactly as it would for a real provider, because mock and real
+blocks share the same execution, validation, failure, and recovery pipeline.
+
+## How retry and fallback work
+
+- `retry` re-runs the same handler up to `maxAttempts`; between attempts the step shows
+  `retrying` and each attempt is logged in the trace.
+- `fallback` swaps the block's handler for `fallbackKey` (e.g. `keyword_classifier`,
+  `mock_provider_b`) and passes it the **original input**, so reclassification-style fallbacks
+  work naturally. The reliability report lists every fallback activated.
+- Puzzle 7 demonstrates the chain: provider A fails → retry (max 2, both fail) → fallback
+  provider B completes the mission.
+
+## How validation and human review work
+
+Validator blocks declare a spec (`required`, `string`, `number`, `enum`, `format`, `threshold`,
+`evidence`). After a block runs, its output is checked; a failed validation marks the step
+`failed` and routes into recovery — including **upstream recovery inheritance**, where the
+validator borrows the recovery config of its nearest upstream step.
+
+Human blocks (`human` kind) pause the run (`paused`), auto-select in the inspector, and wait for
+**Approve / Edit & approve / Reject**. Approved (or edited) runs continue automatically;
+rejection flows into the block's own recovery (in puzzle 5, a `safe_stop` that preserves the
+partial results). Every decision is recorded in the trace with who-decided-what.
+
+## Configuring an optional real AI provider
+
+The engine consumes handlers through a plain `Record<string, (input) => output>` map, so a real
+provider is a drop-in adapter — for example:
+
+```ts
+const handlers = {
+  ...puzzle.handlers,                       // keep deterministic mocks for tools/retrieval
+  real_model: async (input) =>
+    (await fetch('/api/llm', { method: 'POST', body: JSON.stringify(input) })).json(),
+};
+executeWorkflow(runtime, { workflow, handlers, /* … */ });
+```
+
+The shipped build pins every provider to the mock layer (see *Known limitations*) so reviewers
+never need keys or paid access.
+
+## How the mock AI mode works
+
+Every model/tool/retrieval handler in `src/puzzles/index.ts` is a pure function returning a
+recorded, realistic sample response (meeting notes, refund e-mails, classifier scores, fenced
+JSON). The footer badge — **"Mock mode · all puzzles run offline"** — is always visible, and mock
+responses flow through the identical execution/validation/failure/recovery pipeline a real
+provider would. Failure injection is kind-aware: `model_timeout` only hits `model` blocks,
+`empty_retrieval` only `retrieval` blocks, and so on.
+
+## Known limitations
+
+- **Workflow editing is configuration-level, not free-form dragging.** The spec allows "drag
+  canvas, sequential step editor, or other intuitive visual method"; this build focuses on the
+  puzzle loop — run, break, recover — with per-block failure arming rather than adding/deleting
+  blocks on the canvas. The engine is graph-generic, so a free-form editor can be layered on top.
+- **Puzzle 8 is a simulation of interruption**, not a real resume-from-persisted-state: the run
+  replays to the last successful step and then continues, which demonstrates the semantics
+  reviewers are asked to observe.
+- **Mock-only by design**: no real provider is wired in the shipped build (see the adapter note
+  above for how one plugs in).
+- **Edit & approve** uses a JSON prompt rather than a rich inline editor.
