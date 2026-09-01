@@ -1,5 +1,7 @@
 # AI Workflow Puzzle Builder
 
+**Live demo: https://aiafkk.github.io/ai-workflow-puzzle-builder/** — no setup, runs entirely in your browser.
+
 An interactive puzzle app for learning how AI workflows fail — and how to make them recover.
 Build, run, and break 8 seeded workflow puzzles on a visual canvas: inject failures at any block,
 watch the run degrade, and see recovery strategies (retry / fallback / repair / default / route to human /
