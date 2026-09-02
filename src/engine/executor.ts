@@ -190,6 +190,9 @@ export interface ExecuteOptions {
   resumeFromStepId?: string;
   /** Payload captured from the resumed step's last successful output. */
   resumePayload?: unknown;
+  /** Outputs already produced before the interruption, keyed by step id —
+   *  seeds the join map so multi-predecessor steps see prior-segment data. */
+  resumeOutputs?: Record<string, unknown>;
   onTrace?: (entry: TraceEntry) => void;
   onStepStatus?: (stepId: string, status: TraceEntry['status']) => void;
   /** Artificial delay per step so the UI can animate (ms). */
@@ -212,6 +215,7 @@ export async function executeWorkflow(
   const unhandled: string[] = [];
   // Last output produced by each step — powers join (multi-predecessor) steps.
   const outputOf = new Map<string, unknown>();
+  for (const [k, v] of Object.entries(opts.resumeOutputs ?? {})) outputOf.set(k, v);
   const resuming = !!opts.resumeFromStepId;
 
   const order = topoSort(workflow);
@@ -226,7 +230,8 @@ export async function executeWorkflow(
   /** Input for a step: the single predecessor's output, or a joined bundle. */
   const inputFor = (stepId: string, fallback: unknown): unknown => {
     const preds = workflow.edges.filter((e) => e.to === stepId).map((e) => e.from);
-    if (preds.length <= 1) return fallback;
+    if (preds.length === 0) return fallback;
+    if (preds.length === 1) return outputOf.has(preds[0]) ? outputOf.get(preds[0]) : fallback;
     return {
       joined: preds.map((p) => ({ step: p, output: outputOf.get(p) ?? null })),
     };
@@ -287,6 +292,11 @@ export async function executeWorkflow(
           finalOutput = stepInput;
           break outer;
         }
+        if (recovered === 'pause') {
+          outcome = 'paused_human';
+          finalOutput = stepInput;
+          break outer;
+        }
         payload = recovered;
         outputOf.set(stepId, payload);
         continue;
@@ -310,6 +320,11 @@ export async function executeWorkflow(
       const recovered = tryRecover(effStep, stepInput, attempt);
       if (recovered === 'stop') {
         outcome = 'stopped_safe';
+        finalOutput = stepInput;
+        break outer;
+      }
+      if (recovered === 'pause') {
+        outcome = 'paused_human';
         finalOutput = stepInput;
         break outer;
       }
@@ -354,7 +369,7 @@ export async function executeWorkflow(
     step: StepConfig,
     failPayload: unknown,
     failAttempt: number,
-  ): unknown | 'stop' | 'giveup' {
+  ): unknown | 'stop' | 'pause' | 'giveup' {
     const chain = asChain(step.recovery);
     if (!chain.length) {
       unhandled.push(`${step.title}: no recovery configured`);
@@ -439,12 +454,23 @@ export async function executeWorkflow(
               stepId: step.id, status: 'paused', input: failPayload,
               error: recovery.prompt, attempt: failAttempt, at: Date.now(), resumed: resuming,
             });
-            // Treat as safe stop for this pass; UI re-runs with the decision.
-            return 'stop';
+            opts.onStepStatus?.(step.id, 'paused');
+            // Surface the pause to the UI; re-run with a decision to continue.
+            return 'pause';
           }
           if (decision.decision === 'rejected') {
+            push(trace, opts, {
+              stepId: step.id, status: 'failed', error: FAILURE_MESSAGES.human_rejection,
+              humanDecision: 'rejected', attempt: failAttempt, at: Date.now(), resumed: resuming,
+            });
             return 'stop';
           }
+          push(trace, opts, {
+            stepId: step.id, status: 'completed',
+            humanDecision: decision.decision === 'edited' ? 'edited' : 'approved',
+            attempt: failAttempt, at: Date.now(), resumed: resuming,
+          });
+          opts.onStepStatus?.(step.id, 'completed');
           return decision.decision === 'edited' && decision.edited !== undefined
             ? decision.edited
             : failPayload;

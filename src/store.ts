@@ -138,6 +138,13 @@ export const useStore = create<AppState>((set, get) => {
         statusByStep: { ...get().statusByStep, [failedAt.stepId]: 'pending' },
         result: null,
       });
+      // Seed the join map with every output produced before the interruption.
+      const resumeOutputs: Record<string, unknown> = {};
+      for (const t of s.trace) {
+        if ((t.status === 'completed' || t.status === 'recovered') && t.output !== undefined) {
+          resumeOutputs[t.stepId] = t.output;
+        }
+      }
       const result = await executeWorkflow(runtime, {
         workflow: s.workflow,
         handlers: { ...GENERIC_HANDLERS, ...s.puzzle.handlers },
@@ -145,6 +152,7 @@ export const useStore = create<AppState>((set, get) => {
         humanDecisions: s.decisions,
         resumeFromStepId: failedAt.stepId,
         resumePayload: lastGood.output,
+        resumeOutputs,
         onTrace: (entry) => set({ trace: [...get().trace, entry] }),
         onStepStatus: (stepId, status) => set({
           statusByStep: { ...get().statusByStep, [stepId]: status },

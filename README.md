@@ -2,7 +2,7 @@
 
 **Live demo: https://aiafkk.github.io/ai-workflow-puzzle-builder/** — no setup, runs entirely in your browser.
 
-**Demo video (~3 min, 7 journeys incl. build mode, retries and resume): https://github.com/AIAFKK/ai-workflow-puzzle-builder/blob/main/demo/demo-video.webm**
+**Demo video (~2.5 min, 7 journeys incl. build mode, retries and resume): https://github.com/AIAFKK/ai-workflow-puzzle-builder/blob/main/demo/demo-video.webm**
 
 An interactive puzzle app for learning how AI workflows fail — and how to make them recover.
 Pick a seeded puzzle, run it, break it with failure injection, then **build**: add blocks, wire
@@ -24,7 +24,7 @@ no API keys, no network calls, reproducible every single run.
 ```bash
 npm install
 npm run dev        # http://localhost:5199
-npm test           # 10 engine/puzzle tests (vitest)
+npm test           # 12 vitest tests (engine + puzzles)
 npm run build      # production build → dist/
 ```
 
@@ -164,11 +164,12 @@ panel is the Step Inspector.
 
 ## Verification
 
-- `npm test` — 10 vitest suites: pristine 100 + repair (P1), evidence refusal (P2), fallback
+- `npm test` — 12 vitest tests: pristine 100 + repair (P1), evidence refusal (P2), fallback
   (P3), two-source join + skipped-source flag (P4), pause/approve/**edited**/reject (P5),
   JSON repair (P6), **retry ×2 visible then fallback** (P7), **interrupt → safe stop → resume
-  to completion** (P8), an all-8 offline determinism sweep, and a build-mode journey (user
-  inserts a validator, workflow still completes).
+  to completion** (P8), an all-8 offline determinism sweep, a build-mode journey (user
+  inserts a validator, workflow still completes), parallel branches never crossing
+  streams, and route_human truly pausing until approved.
 - `npx tsc --noEmit` — clean.
 - `npm run build` — clean production bundle.
 - All screenshots in `demo/` come from the real app, offline.
@@ -220,8 +221,8 @@ provider would.
 - **Build mode edits block-level structure** (add/remove/connect blocks, configure recovery),
   not the payload schema of seeded puzzle blocks — added blocks bind to generic passthrough
   mocks rather than a per-block payload editor.
-- **One human decision pass per run** — after a decision the run continues to the end; pausing
-  again requires a fresh Run (decisions are remembered).
+- **Decisions persist until Reset** — once you approve/edit/reject a human gate, subsequent
+  Runs replay the recorded decision instead of pausing again; press Reset to decide afresh.
 - **Mock-only by design**: no real provider is wired in the shipped build (adapter note above).
 - **Condition blocks route linearly** — branching renders one path; the branch edge labels in
   the data model are not yet drawn on the canvas.

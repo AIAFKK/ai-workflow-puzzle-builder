@@ -148,4 +148,57 @@ describe('engine', () => {
     expect(r.outcome).toBe('completed');
     expect(r.trace.some((t) => t.stepId === 'user_val' && t.status === 'completed')).toBe(true);
   });
+
+  it('parallel branches never cross streams: each step sees only its predecessors', async () => {
+    const wf = {
+      id: 'parallel-wf', puzzleId: 'test',
+      steps: [
+        { id: 'inA', kind: 'input' as const, title: 'A', position: { x: 0, y: 0 }, handlerKey: 'inA', armedFailures: [] },
+        { id: 'inB', kind: 'input' as const, title: 'B', position: { x: 0, y: 200 }, handlerKey: 'inB', armedFailures: [] },
+        { id: 'mA', kind: 'model' as const, title: 'MA', position: { x: 300, y: 0 }, handlerKey: 'mA', armedFailures: [] },
+        { id: 'mB', kind: 'model' as const, title: 'MB', position: { x: 300, y: 200 }, handlerKey: 'mB', armedFailures: [] },
+      ],
+      edges: [
+        { id: 'p1', from: 'inA', to: 'mA' },
+        { id: 'p2', from: 'inB', to: 'mB' },
+      ],
+    };
+    const r = await executeWorkflow(createRuntime(), {
+      workflow: wf,
+      handlers: handlersWith({
+        inA: () => ({ from: 'A' }),
+        inB: () => ({ from: 'B' }),
+        mA: (input) => ({ got: input }),
+        mB: (input) => ({ got: input }),
+      }),
+      armed: {},
+    });
+    expect(r.outcome).toBe('completed');
+    const got = Object.fromEntries(r.trace.filter((t) => t.status === 'completed' && t.output).map((t) => [t.stepId, t.output]));
+    expect((got.mA as { got: { from: string } }).got.from).toBe('A'); // not B
+    expect((got.mB as { got: { from: string } }).got.from).toBe('B'); // not A's output
+  });
+
+  it('route_human pauses the run for a decision and completes once approved', async () => {
+    const p = PUZZLES.find((x) => x.id === 'meeting-summarizer')!;
+    const wf: typeof p.workflow = JSON.parse(JSON.stringify(p.workflow));
+    // Replace the repair recovery with route_human: on failure a human decides.
+    wf.steps = wf.steps.map((st) => st.id === 'model1'
+      ? { ...st, recovery: { kind: 'route_human' as const, prompt: 'Review the model output' } }
+      : st);
+    const base = {
+      workflow: wf,
+      handlers: handlersWith(p.handlers),
+      armed: { model1: ['missing_field'] } as never,
+    };
+    const paused = await executeWorkflow(createRuntime(), base);
+    expect(paused.outcome).toBe('paused_human'); // truly pauses — not a silent stop
+    expect(paused.trace.some((t) => t.status === 'paused')).toBe(true);
+
+    const approved = await executeWorkflow(createRuntime(), {
+      ...base,
+      humanDecisions: { model1: { decision: 'approved' } } as never,
+    });
+    expect(approved.outcome).toBe('completed');
+  });
 });
