@@ -2,7 +2,9 @@
 // Each puzzle: title / difficulty / objective / blocks / sample input /
 // expected result / failure scenario / completion criteria per the spec.
 
-import type { FailureMode, WorkflowDefinition } from '../engine/types';
+import type { FailureMode, HandlerCtx, WorkflowDefinition } from '../engine/types';
+
+export type PuzzleHandler = (input: unknown, ctx?: HandlerCtx) => unknown;
 
 export interface Puzzle {
   id: string;
@@ -17,7 +19,7 @@ export interface Puzzle {
   /** Failures the puzzle asks the user to arm while exploring. */
   suggestedFailures: Record<string, FailureMode[]>;
   workflow: WorkflowDefinition;
-  handlers: Record<string, (input: unknown) => unknown>;
+  handlers: Record<string, PuzzleHandler>;
 }
 
 const wf = (puzzleId: string, steps: WorkflowDefinition['steps'], edges: WorkflowDefinition['edges']): WorkflowDefinition => ({
@@ -48,7 +50,7 @@ const p1 = (): Puzzle => ({
   workflow: wf('meeting-summarizer', [
     { id: 'input1', kind: 'input', title: 'Meeting Notes', position: { x: 0, y: 160 }, handlerKey: 'p1_input', armedFailures: [] },
     { id: 'model1', kind: 'model', title: 'Summarizer Model', position: { x: 260, y: 160 }, handlerKey: 'p1_model', armedFailures: [], recovery: { kind: 'repair' } },
-    { id: 'val1', kind: 'validator', title: 'Owners Present?', position: { x: 520, y: 160 }, handlerKey: 'pass', validation: { field: 'action_items', type: 'required' }, armedFailures: [] },
+    { id: 'val1', kind: 'validator', title: 'Owners Present?', position: { x: 520, y: 160 }, handlerKey: 'pass', validation: { field: 'action_items', type: 'nonEmptyItems', sub: 'owner' }, armedFailures: [] },
     { id: 'out1', kind: 'output', title: 'Structured Minutes', position: { x: 780, y: 160 }, handlerKey: 'pass', armedFailures: [] },
   ], [
     { id: 'e1', from: 'input1', to: 'model1' },
@@ -59,18 +61,14 @@ const p1 = (): Puzzle => ({
     p1_input: () => ({
       notes: 'Meeting notes: "We decided to ship the beta on Friday. Alice will write the release notes. Bob follows up with legal."',
     }),
-    p1_model: (input) => {
-      const armed = (input as { __armedMissing?: boolean });
-      void armed;
-      return {
-        summary: 'Team aligned on shipping the beta on Friday.',
-        decisions: ['Ship beta on Friday'],
-        action_items: [
-          { owner: 'Alice', task: 'Write release notes' },
-          { owner: '', task: 'Follow up with legal' }, // malformed when injected
-        ],
-      };
-    },
+    p1_model: () => ({
+      summary: 'Team aligned on shipping the beta on Friday.',
+      decisions: ['Ship beta on Friday'],
+      action_items: [
+        { owner: 'Alice', task: 'Write the release notes' },
+        { owner: 'Bob', task: 'Follow up with legal' },
+      ],
+    }),
     'p1_model__repair': () => ({
       summary: 'Team aligned on shipping the beta on Friday.',
       decisions: ['Ship beta on Friday'],
@@ -103,7 +101,7 @@ const p2 = (): Puzzle => ({
   suggestedFailures: { ret1: ['empty_retrieval'] },
   workflow: wf('knowledge-assistant', [
     { id: 'input1', kind: 'input', title: 'User Question', position: { x: 0, y: 160 }, handlerKey: 'p2_input', armedFailures: [] },
-    { id: 'ret1', kind: 'retrieval', title: 'Knowledge Lookup', position: { x: 260, y: 60 }, handlerKey: 'p2_retrieval', armedFailures: [] },
+    { id: 'ret1', kind: 'retrieval', title: 'Knowledge Lookup', position: { x: 260, y: 60 }, handlerKey: 'p2_retrieval', armedFailures: [], recovery: { kind: 'default', value: { evidence: ['refusal — no supporting documents retrieved'], refused: true } } },
     { id: 'val1', kind: 'validator', title: 'Evidence Present?', position: { x: 520, y: 60 }, handlerKey: 'pass', validation: { field: 'evidence', type: 'evidence' }, armedFailures: [] },
     { id: 'model1', kind: 'model', title: 'Grounded Answer', position: { x: 780, y: 60 }, handlerKey: 'p2_model', armedFailures: [] },
     { id: 'out1', kind: 'output', title: 'Answer', position: { x: 1040, y: 60 }, handlerKey: 'pass', armedFailures: [] },
@@ -116,10 +114,13 @@ const p2 = (): Puzzle => ({
   handlers: {
     p2_input: () => ({ question: 'What is the refund policy for the Pro plan?' }),
     p2_retrieval: () => ({ evidence: ['policy.md#refunds: Pro plans refundable within 14 days'], question: 'What is the refund policy?' }),
-    p2_model: (input) => ({
-      answer: 'Pro plans are refundable within 14 days of purchase.',
-      citations: (input as { evidence?: string[] }).evidence ?? [],
-    }),
+    p2_model: (input) => {
+      const i = input as { evidence?: string[]; refused?: boolean };
+      if (i.refused) {
+        return { answer: 'I don\'t have enough evidence to answer — please check the knowledge base.', citations: [], refused: true };
+      }
+      return { answer: 'Pro plans are refundable within 14 days of purchase.', citations: i.evidence ?? [] };
+    },
     pass: (input) => input,
   },
 });
@@ -205,7 +206,22 @@ const p4 = (): Puzzle => ({
     p4_input: () => ({ topic: 'adoption of vector databases 2026' }),
     p4_sourceA: () => ({ source: 'A', facts: ['Adoption doubled YoY in 2026', 'pgvector leads self-hosted segment'] }),
     p4_sourceB: () => ({ source: 'B', facts: ['Managed vector DBs grew 3x'] }),
-    p4_model: (input) => input,
+    p4_model: (input) => {
+      const j = (input as { joined?: Array<{ step: string; output: { source?: string; facts?: string[]; note?: string } | null }> }).joined;
+      if (!j) return input; // single-predecessor fallback
+      const facts: string[] = [];
+      const skipped: string[] = [];
+      for (const p of j) {
+        const o = p.output ?? {};
+        if (Array.isArray(o.facts)) facts.push(...o.facts);
+        if (o.note && String(o.note).startsWith('skipped')) skipped.push(o.source ?? p.step);
+      }
+      return {
+        brief: facts.join(' '),
+        sourcesUsed: j.length - skipped.length,
+        skippedSources: skipped,
+      };
+    },
     pass: (input) => input,
   },
 });
@@ -308,13 +324,11 @@ const p7 = (): Puzzle => ({
   suggestedFailures: { model1: ['model_timeout'] },
   workflow: wf('activate-fallback', [
     { id: 'input1', kind: 'input', title: 'Feature Notes', position: { x: 0, y: 160 }, handlerKey: 'p7_input', armedFailures: [] },
-    { id: 'retry1', kind: 'retry', title: 'Retry (max 2)', position: { x: 250, y: 40 }, handlerKey: 'pass', armedFailures: [], recovery: { kind: 'retry', maxAttempts: 2 } },
-    { id: 'model1', kind: 'model', title: 'Primary Model', position: { x: 250, y: 180 }, handlerKey: 'p7_model', armedFailures: [], recovery: { kind: 'fallback', fallbackKey: 'p7_fallback', label: 'Mock provider B' } },
-    { id: 'out1', kind: 'output', title: 'Release Note', position: { x: 560, y: 180 }, handlerKey: 'pass', armedFailures: [] },
+    { id: 'model1', kind: 'model', title: 'Primary Model (retry ×2 → fallback)', position: { x: 260, y: 160 }, handlerKey: 'p7_model', armedFailures: [], recovery: [{ kind: 'retry', maxAttempts: 2 }, { kind: 'fallback', fallbackKey: 'p7_fallback', label: 'Mock provider B' }] },
+    { id: 'out1', kind: 'output', title: 'Release Note', position: { x: 560, y: 160 }, handlerKey: 'pass', armedFailures: [] },
   ], [
-    { id: 'e1', from: 'input1', to: 'retry1' },
-    { id: 'e2', from: 'retry1', to: 'model1' },
-    { id: 'e3', from: 'model1', to: 'out1' },
+    { id: 'e1', from: 'input1', to: 'model1' },
+    { id: 'e2', from: 'model1', to: 'out1' },
   ]),
   handlers: {
     p7_input: () => ({ feature: 'v2.4.0: faster sync' }),
@@ -341,11 +355,11 @@ const p8 = (): Puzzle => ({
     'Resume continues from the last successful step',
     'Final trace shows both the interrupted and resumed segments',
   ],
-  suggestedFailures: { hotel: ['tool_failure'] },
+  suggestedFailures: {},
   workflow: wf('resume-mission', [
     { id: 'input1', kind: 'input', title: 'Trip Request', position: { x: 0, y: 160 }, handlerKey: 'p8_input', armedFailures: [] },
     { id: 'flight', kind: 'tool', title: 'Flight Lookup', position: { x: 240, y: 160 }, handlerKey: 'p8_flight', armedFailures: [] },
-    { id: 'hotel', kind: 'tool', title: 'Hotel Lookup', position: { x: 480, y: 160 }, handlerKey: 'p8_hotel', armedFailures: [], recovery: { kind: 'safe_stop', reason: 'Hotel provider crashed — resume later' } },
+    { id: 'hotel', kind: 'tool', title: 'Hotel Lookup', position: { x: 480, y: 160 }, handlerKey: 'p8_hotel', armedFailures: [], recovery: { kind: 'safe_stop', reason: 'Hotel provider crashed — press Resume to continue from Flight Lookup' } },
     { id: 'model1', kind: 'model', title: 'Itinerary Writer', position: { x: 720, y: 160 }, handlerKey: 'p8_model', armedFailures: [] },
     { id: 'out1', kind: 'output', title: 'Trip Plan', position: { x: 960, y: 160 }, handlerKey: 'pass', armedFailures: [] },
   ], [
@@ -357,11 +371,32 @@ const p8 = (): Puzzle => ({
   handlers: {
     p8_input: () => ({ destination: 'Kyoto', dates: '2026-11-03 → 2026-11-08' }),
     p8_flight: () => ({ flight: 'NH-220 HND→KIX 11-03 09:30' }),
-    p8_hotel: () => { throw new Error('INTERNAL_ERROR'); },
+    p8_hotel: (_input, ctx) => {
+      // Simulated interruption: the provider crashes on its first execution
+      // and comes back on the second — i.e. after the user presses Resume.
+      if (!ctx || ctx.executionCount < 2) throw new Error('INTERNAL_ERROR');
+      return { hotel: 'Ryokan Yuzuya · 4 nights · confirmed after recovery' };
+    },
     p8_model: (input) => ({ itinerary: input }),
     pass: (input) => input,
   },
 });
+
+// Generic deterministic mocks for blocks the user adds in Build mode.
+// Bound by handlerKey `generic_<kind>`; they flow through the exact same
+// execution / validation / failure / recovery pipeline as puzzle mocks.
+export const GENERIC_HANDLERS: Record<string, PuzzleHandler> = {
+  generic_input: () => ({ sample: 'Sample input payload' }),
+  generic_model: (input) => ({ summary: 'Model processed the payload.', input }),
+  generic_tool: (input) => ({ tool: 'mock-tool', result: 'ok', input }),
+  generic_retrieval: () => ({ evidence: ['doc-1: a sample evidence passage'] }),
+  generic_condition: (input) => input,
+  generic_validator: (input) => input,
+  generic_retry: (input) => input,
+  generic_fallback: (input) => ({ note: 'fallback handler output', input }),
+  generic_human: (input) => input,
+  generic_output: (input) => input,
+};
 
 export const PUZZLES: Puzzle[] = [p1(), p2(), p3(), p4(), p5(), p6(), p7(), p8()];
 

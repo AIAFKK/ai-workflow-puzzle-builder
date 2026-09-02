@@ -43,6 +43,17 @@ export type RecoveryAction =
   | { kind: 'route_human'; prompt: string }
   | { kind: 'safe_stop'; reason: string };
 
+/**
+ * A step may carry a single recovery action or a chain tried in order —
+ * e.g. retry twice, then fail over to a fallback provider.
+ */
+export type RecoveryChain = RecoveryAction | RecoveryAction[];
+
+export interface HandlerCtx {
+  /** How many times this step's handler has executed across runs (1-based). */
+  executionCount: number;
+}
+
 export interface StepConfig {
   id: string;
   kind: BlockKind;
@@ -52,9 +63,9 @@ export interface StepConfig {
   position: { x: number; y: number };
   /** Model/tool/validator payload key resolved by the puzzle runtime. */
   handlerKey?: string;
-  /** Zod-flavoured validation descriptor when kind === 'validator'. */
+  /** Declarative validation descriptor when kind === 'validator'. */
   validation?: ValidationSpec;
-  recovery?: RecoveryAction;
+  recovery?: RecoveryChain;
   /** Failure injections currently armed for this step. */
   armedFailures: FailureMode[];
   /** Branch labels for condition steps: edgeId -> label. */
@@ -64,11 +75,13 @@ export interface StepConfig {
 export interface ValidationSpec {
   /** Field name the validator inspects on the flowing payload. */
   field?: string;
-  type: 'required' | 'string' | 'number' | 'enum' | 'format' | 'threshold' | 'evidence';
+  type: 'required' | 'string' | 'number' | 'enum' | 'format' | 'threshold' | 'evidence' | 'nonEmptyItems';
   /** enum options, numeric threshold or format name depending on `type`. */
   options?: string[];
   threshold?: number;
   format?: 'json' | 'iso-date' | 'email';
+  /** for nonEmptyItems: the sub-field every array item must carry non-blank. */
+  sub?: string;
 }
 
 export interface WorkflowDefinition {
@@ -87,7 +100,9 @@ export interface TraceEntry {
   recovery?: string;
   humanDecision?: 'approved' | 'edited' | 'rejected';
   attempt: number;
-  at: number; // monotonic ms
+  at: number; // wall-clock ms
+  /** True when this entry belongs to a resumed segment (puzzle 8). */
+  resumed?: boolean;
 }
 
 export interface RunResult {
